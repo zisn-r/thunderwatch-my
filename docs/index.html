@@ -241,6 +241,31 @@ function initRoute(){
   }).catch(e=>statusEl.textContent='Route fetch failed: '+e);
 }
 
+// ---------- Transit route mode (rail line geometry via deep-link) ----------
+function initTransit(){
+  const ol=[parseFloat(params.get('olat')),parseFloat(params.get('olon'))];
+  const dl=[parseFloat(params.get('dlat')),parseFloat(params.get('dlon'))];
+  const lineName=params.get('line')||'Rail';
+  if(!ol.every(isFinite)||!dl.every(isFinite)){ statusEl.textContent='Route params missing.'; return; }
+  L.circleMarker(ol,{radius:9,color:'#fff',weight:2,fillColor:'#39c06f',fillOpacity:1})
+    .bindTooltip('From here').addTo(map);
+  L.circleMarker(dl,{radius:9,color:'#fff',weight:2,fillColor:'#e5484d',fillOpacity:1})
+    .bindTooltip('Destination').addTo(map);
+  const poly=(params.get('poly')||'').split(',').map(p=>{
+    const [la,lo]=p.split(';').map(parseFloat);
+    return (isFinite(la)&&isFinite(lo))?[la,lo]:null;
+  }).filter(Boolean);
+  if(poly.length>1){
+    L.polyline(poly,{color:'#9b59d0',weight:6,opacity:.9}).addTo(map);
+    map.fitBounds(poly,{padding:[40,40]});
+    statusEl.textContent=`🚆 ${lineName} — your rail route (from official data.gov.my GTFS). `+
+      '<span class="honest">Board/alight stations marked green/red.</span>';
+  } else {
+    map.fitBounds([ol,dl],{padding:[40,40]});
+    statusEl.textContent='No rail geometry available.';
+  }
+}
+
 // ---------- tab switching ----------
 const tabRadar=document.getElementById('tab-radar'), tabForecast=document.getElementById('tab-forecast');
 let mode='radar';
@@ -266,6 +291,10 @@ if(params.get('route')==='1'){
   document.querySelector('.tabs').style.display='none';
   document.getElementById('controls').style.display='none';
   initRoute();
+} else if(params.get('transit')==='1'){
+  document.querySelector('.tabs').style.display='none';
+  document.getElementById('controls').style.display='none';
+  initTransit();
 } else {
   initRadar();
 }

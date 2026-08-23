@@ -21,7 +21,7 @@ import urllib.request
 import zipfile
 
 from risk import (score_hour, risk_level, haversine_km, fetch_open_meteo,
-                  cache_get, cache_put)  # noqa: E402
+                  http_json, cache_get, cache_put, CACHE_DIR)  # noqa: E402
 
 UA_HEADERS = {"User-Agent": "ThunderWatch-MY/1.0 (hackathon demo; contact: izulr)"}
 GTFS_URL = "https://api.data.gov.my/gtfs-static/prasarana?category=rapid-rail-kl"
@@ -90,6 +90,137 @@ def nearest_stations(lat, lon, k=3):
     return out
 
 
+# --- rail route from GTFS (line geometry + step-by-step) ---------------------
+
+def load_rail_index():
+    """Parse rapid-rail-kl GTFS into a compact index (cached 24 h — GTFS is static)."""
+    cache_file = os.path.join(CACHE_DIR, "gtfs_railindex.json")
+    try:
+        if time.time() - os.stat(cache_file).st_mtime < GTFS_CACHE_S:
+            with open(cache_file, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except (OSError, ValueError):
+        pass
+    req = urllib.request.Request(GTFS_URL, headers=UA_HEADERS)
+    data = urllib.request.urlopen(req, timeout=60).read()
+    z = zipfile.ZipFile(io.BytesIO(data))
+
+    def rows(name):
+        return list(csv.DictReader(io.TextIOWrapper(z.open(name), encoding="utf-8-sig")))
+
+    routes = {r["route_id"]: r["route_long_name"] for r in rows("routes.txt")}
+    stops = {s["stop_id"]: {"name": s["stop_name"],
+                            "lat": float(s["stop_lat"]), "lon": float(s["stop_lon"])}
+             for s in rows("stops.txt")}
+    trips = {}
+    for t in rows("trips.txt"):
+        trips[t["trip_id"]] = {"route_id": t["route_id"],
+                               "headsign": t.get("trip_headsign", ""),
+                               "direction": t.get("direction_id", "0"),
+                               "shape_id": t.get("shape_id", "")}
+    trip_stops = {}
+    for st in rows("stop_times.txt"):
+        trip_stops.setdefault(st["trip_id"], []).append(
+            (int(st["stop_sequence"]), st["stop_id"]))
+    shapes = {}
+    for sp in rows("shapes.txt"):
+        shapes.setdefault(sp["shape_id"], []).append(
+            (int(sp["shape_pt_sequence"]), float(sp["shape_pt_lat"]),
+             float(sp["shape_pt_lon"])))
+    shapes = {sid: [(lat, lon) for _, lat, lon in sorted(pts)]
+              for sid, pts in shapes.items()}
+
+    # Canonical stop sequence per route+direction: the longest trip
+    best_seq = {}
+    for tid, t in trips.items():
+        seq = [sid for _, sid in sorted(trip_stops.get(tid, []))]
+        key = (t["route_id"], t["direction"])
+        if len(seq) > len(best_seq.get(key, {"seq": []})["seq"]):
+            best_seq[key] = {"seq": seq, "shape_id": t["shape_id"],
+                             "headsign": t["headsign"]}
+
+    index = {"routes": routes, "stops": stops,
+             "lines": [{"route_id": k[0], "direction": k[1], **v}
+                       for k, v in best_seq.items()],
+             "shapes": shapes}
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    with open(cache_file, "w", encoding="utf-8") as f:
+        json.dump(index, f)
+    return index
+
+
+def rail_route(o_stop, d_stop):
+    """Direct rail connection between two stops: line, stops between, polyline."""
+    if o_stop == d_stop:
+        return None
+    idx = load_rail_index()
+    best = None
+    for line in idx["lines"]:
+        seq = line["seq"]
+        if o_stop in seq and d_stop in seq:
+            io, id_ = seq.index(o_stop), seq.index(d_stop)
+            if io >= id_:
+                continue  # wrong travel direction for this trip sequence
+            best = (line, seq, io, id_)
+            break
+    if not best:
+        return None
+    line, seq, io, id_ = best
+    between = seq[io + 1:id_]
+    shape = idx["shapes"].get(line["shape_id"], [])
+    if not shape:
+        return None
+
+    # slice shape between the two stops (nearest shape point per stop)
+    def nearest_i(stop_id):
+        s = idx["stops"][stop_id]
+        return min(range(len(shape)),
+                   key=lambda i: (shape[i][0] - s["lat"]) ** 2
+                   + (shape[i][1] - s["lon"]) ** 2)
+    i_o, i_d = nearest_i(o_stop), nearest_i(d_stop)
+    if i_o > i_d:
+        i_o, i_d = i_d, i_o
+    poly = shape[i_o:i_d + 1]
+    headsign = line["headsign"]
+    toward = headsign.split(" to ")[-1] if " to " in headsign else headsign
+    return {
+        "line_name": idx["routes"].get(line["route_id"], line["route_id"]),
+        "toward": toward,
+        "board": idx["stops"][o_stop],
+        "alight": idx["stops"][d_stop],
+        "n_stops_between": len(between),
+        "between_names": [idx["stops"][s]["name"] for s in between],
+        "polyline": [[round(lat, 5), round(lon, 5)] for lat, lon in poly],
+    }
+
+
+# --- OSRM turn-by-turn --------------------------------------------------------
+
+def osrm_steps(origin, dest, max_steps=8):
+    """Driving maneuvers from the OSRM demo server (CORS-open)."""
+    url = ("https://router.project-osrm.org/route/v1/driving/"
+           f"{origin[1]},{origin[0]};{dest[1]},{dest[0]}?overview=false&steps=true")
+    try:
+        d = http_json(url)
+    except Exception:
+        return [], {}
+    if d.get("code") != "Ok" or not d.get("routes"):
+        return [], {}
+    rt = d["routes"][0]
+    meta = {"distance_km": round(rt["distance"] / 1000, 1),
+            "duration_min": round(rt["duration"] / 60)}
+    steps = []
+    for s in rt["legs"][0]["steps"]:
+        m = s.get("maneuver", {})
+        steps.append({"type": m.get("type", ""), "modifier": m.get("modifier", ""),
+                      "road": (s.get("name") or "").strip(),
+                      "dist_m": int(s.get("distance", 0)),
+                      "exit": m.get("exit")})
+        if len(steps) >= max_steps:
+            break
+    return steps, meta
+
+
 # --- route sampling -----------------------------------------------------------
 
 def route_points(origin, dest, n=8):
@@ -142,10 +273,17 @@ def assess_route(origin, dest, mode, hours_ahead=6):
 
     # Alternative: nearest rail/LRT stations to origin and destination
     alt = None
+    rail = None
     if mode != "public_transport":
         near_o = nearest_stations(*origin, k=1)[0]
         near_d = nearest_stations(*dest, k=1)[0]
         alt = {"origin_station": near_o, "dest_station": near_d}
+        rail = rail_route(near_o["id"], near_d["id"])
+    else:
+        near_o = nearest_stations(*origin, k=1)[0]
+        near_d = nearest_stations(*dest, k=1)[0]
+        alt = {"origin_station": near_o, "dest_station": near_d}
+        rail = rail_route(near_o["id"], near_d["id"])
 
     return {
         "mode": mode,
@@ -155,6 +293,7 @@ def assess_route(origin, dest, mode, hours_ahead=6):
         "worst_level": risk_level(worst["score"]),
         "recommend_switch": heavy,
         "alternative": alt,
+        "rail": rail,
         "note": "Route weather sampled along a straight line between origin and "
                 "destination (road-level routing not available on free data).",
     }

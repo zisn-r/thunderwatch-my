@@ -153,6 +153,51 @@ MODE_LABEL_KEYS = {"motorcycle": "mode_label_motorcycle", "car": "mode_label_car
                    "public_transport": "mode_label_pt"}
 
 
+MANEUVER_LABELS = {
+    "depart": "Head out", "arrive": "Arrive", "turn": "Turn", "new name": "Continue onto",
+    "merge": "Merge onto", "on ramp": "Take the ramp onto", "off ramp": "Take the exit",
+    "fork": "Keep", "end of road": "At the end of the road, turn",
+    "roundabout": "At the roundabout, take the exit onto",
+    "exit roundabout": "Exit the roundabout onto",
+}
+
+
+def steps_lines_lang(steps, meta, lang):
+    lines = []
+    if meta:
+        lines.append(t(lang, "drive_summary", km=meta.get("distance_km", "?"),
+                       min=meta.get("duration_min", "?")))
+    for s in steps:
+        label = MANEUVER_LABELS.get(s["type"], s["type"] or "Continue")
+        if s["road"]:
+            lines.append(t(lang, "drive_road", road=f"{label} → {s['road']}"))
+        elif s["type"] in ("depart", "arrive"):
+            continue  # noise without a road name
+        else:
+            lines.append(t(lang, "drive_unnamed", type=label,
+                           mod=f" {s['modifier']}" if s["modifier"] else ""))
+    return lines
+
+
+def rail_lines_lang(rail, alt, lang):
+    lines = []
+    if alt and rail:
+        o, d = alt["origin_station"], alt["dest_station"]
+        if o["dist_km"] >= 0.2:
+            lines.append(t(lang, "walk_to", d=o["dist_km"], s=rail["board"]["name"]))
+        lines.append(t(lang, "board_rail", line=rail["line_name"], toward=rail["toward"]))
+        names = rail["between_names"]
+        if rail["n_stops_between"] <= 8:
+            shown = " → ".join(names)
+        else:
+            shown = " → ".join(names[:4]) + f" → … → {names[-1]}"
+        lines.append(t(lang, "ride_stops", n=rail["n_stops_between"], stops=shown))
+        lines.append(t(lang, "alight", s=rail["alight"]["name"]))
+        if d["dist_km"] >= 0.2:
+            lines.append(t(lang, "walk_from", d=d["dist_km"]))
+    return lines
+
+
 def build_commute_reply(origin, dest, res, lang, origin_coords, dest_coords):
     w = res["worst"]
     precip = f", rain {w['precip_prob']}%" if w["precip_prob"] else ""
@@ -179,13 +224,41 @@ def build_commute_reply(origin, dest, res, lang, origin_coords, dest_coords):
                                    d=d["name"]))
                 else:
                     lines.append(t(lang, "commute_alt_nearest", o=o["name"], od=o["dist_km"]))
-    # Deep link to the dashboard route view (OSRM road geometry) — all replies
+
+    # Step-by-step directions
+    lines.append(t(lang, "steps_title").strip("\n"))
+    if res["mode"] == "public_transport":
+        rl = rail_lines_lang(res.get("rail"), res.get("alternative"), lang)
+        lines.extend(rl if rl else ["🚆 No direct rail connection found — "
+                                     "nearest stations listed above."])
+    else:
+        try:
+            steps, meta = commute.osrm_steps(origin_coords, dest_coords)
+            lines.extend(steps_lines_lang(steps, meta, lang))
+        except Exception:
+            pass
+
+    # Map link: MODE-AWARE — rail geometry for public transport, OSRM road otherwise
     olat, olon = origin_coords
     dlat, dlon = dest_coords
-    route_link = (f"{DASHBOARD_URL}?route=1&olat={olat:.5f}&olon={olon:.5f}"
-                  f"&dlat={dlat:.5f}&dlon={dlon:.5f}")
-    lines.append(t(lang, "view_map", link=route_link))
-    lines += ["", t(lang, "commute_note")]
+    rail = res.get("rail")
+    if res["mode"] == "public_transport" and rail:
+        # downsample polyline (every 3rd point) to keep the deep-link short
+        poly_pts = rail["polyline"][::3]
+        if rail["polyline"][-1] != poly_pts[-1]:
+            poly_pts = poly_pts + [rail["polyline"][-1]]
+        poly = ",".join(f"{lat:.5f};{lon:.5f}" for lat, lon in poly_pts)
+        route_link = (f"{DASHBOARD_URL}?transit=1&olat={olat:.5f}&olon={olon:.5f}"
+                      f"&dlat={dlat:.5f}&dlon={dlon:.5f}"
+                      f"&line={urllib.parse.quote(rail['line_name'])}&poly={poly}")
+    else:
+        route_link = (f"{DASHBOARD_URL}?route=1&olat={olat:.5f}&olon={olon:.5f}"
+                      f"&dlat={dlat:.5f}&dlon={dlon:.5f}")
+    key = "view_rail_map" if res["mode"] == "public_transport" and rail else "view_map"
+    lines.append(t(lang, key, link=route_link))
+    note_key = ("commute_note_transit" if res["mode"] == "public_transport" and rail
+                else "commute_note")
+    lines += ["", t(lang, note_key)]
     return "\n".join(lines)
 
 
@@ -262,6 +335,10 @@ def main():
                 chat = msg.get("chat", {}).get("id")
                 text = (msg.get("text") or "").strip()
 
+                if text.startswith("/start"):
+                    tg("sendMessage", chat_id=chat,
+                       text=t(lang_of(chat), "start_welcome"), parse_mode="Markdown")
+                    continue
                 if text in ("/bm", "/bahasa"):
                     chat_lang[chat] = "bm"
                     tg("sendMessage", chat_id=chat,

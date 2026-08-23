@@ -15,14 +15,29 @@ import urllib.parse
 import urllib.request
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "core"))
-import risk  # noqa: E402
+import risk      # noqa: E402
+import commute   # noqa: E402
 
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "https://zisn-r.github.io/thunderwatch-my/")
 API = f"https://api.telegram.org/bot{TOKEN}"
 
+# Conversation state for the commute flow: chat_id -> {"origin": str|None}
+commute_state = {}
+
+MODE_KEYBOARD = {
+    "inline_keyboard": [[
+        {"text": "🏍 Motorcycle", "callback_data": "mode:motorcycle"},
+        {"text": "🚗 Car", "callback_data": "mode:car"},
+        {"text": "🚆 Public Transport", "callback_data": "mode:public_transport"},
+    ]]
+}
+
 
 def tg(method, **payload):
+    for k, v in payload.items():
+        if isinstance(v, (dict, list)):
+            payload[k] = json.dumps(v)
     data = urllib.parse.urlencode(payload).encode()
     req = urllib.request.Request(f"{API}/{method}", data=data)
     with urllib.request.urlopen(req, timeout=30) as r:
@@ -74,6 +89,43 @@ def extract_location(msg):
     return None
 
 
+# --- commute flow -----------------------------------------------------------
+
+def handle_commute_text(chat_id, origin, dest):
+    commute_state[chat_id] = {"origin": origin, "dest": dest}
+    tg("sendMessage", chat_id=chat_id,
+       text=f"🚦 Commute check: *{origin}* → *{dest}*\nHow are you travelling?",
+       parse_mode="Markdown", reply_markup=MODE_KEYBOARD)
+
+
+def handle_mode_choice(chat_id, mode, demo_rain=False):
+    st = commute_state.pop(chat_id, None)
+    if not st:
+        tg("sendMessage", chat_id=chat_id, text="Start again with /commute.")
+        return
+    try:
+        o = commute.geocode(st["origin"])
+        d = commute.geocode(st["dest"])
+        if not o or not d:
+            tg("sendMessage", chat_id=chat_id,
+               text="Sorry, I couldn't find one of those places. Try /commute again.")
+            return
+        res = commute.assess_route((o[0], o[1]), (d[0], d[1]), mode)
+        if demo_rain and not res["recommend_switch"]:
+            # Demo override: simulate a heavy-rain window so judges can see
+            # the mode-switch recommendation even on a dry day.
+            res["worst"] = {"score": 78.0, "precip_prob": 85,
+                            "time": res["worst"].get("time"), "seg": res["worst"].get("seg", 0)}
+            res["worst_level"] = risk.risk_level(res["worst"]["score"])
+            res["recommend_switch"] = True
+        text = commute.human_advice(st["origin"], st["dest"], res)
+        if demo_rain:
+            text += "\n\n_(demo simulation: heavy rain injected)_"
+        tg("sendMessage", chat_id=chat_id, text=text, parse_mode="Markdown")
+    except Exception as e:
+        tg("sendMessage", chat_id=chat_id, text=f"Commute check failed: {e}")
+
+
 def main():
     if not TOKEN:
         print("Set TELEGRAM_BOT_TOKEN first.", file=sys.stderr)
@@ -87,10 +139,47 @@ def main():
             if offset:
                 args["offset"] = offset
             res = tg("getUpdates", **args)
+            demo_rain = os.environ.get("DEMO_RAIN") == "1"
             for upd in res.get("result", []):
                 offset = upd["update_id"] + 1
+
+                cb = upd.get("callback_query")
+                if cb:
+                    tg("answerCallbackQuery", callback_query_id=cb["id"])
+                    data = cb.get("data", "")
+                    if data.startswith("mode:"):
+                        handle_mode_choice(cb["message"]["chat"]["id"],
+                                           data.split(":", 1)[1], demo_rain)
+                    continue
+
                 msg = upd.get("message") or {}
                 chat = msg.get("chat", {}).get("id")
+                text = (msg.get("text") or "").strip()
+
+                if text.startswith("/commute"):
+                    rest = text[len("/commute"):].strip()
+                    if "|" in rest:
+                        origin, dest = [p.strip() for p in rest.split("|", 1)]
+                        if origin and dest:
+                            handle_commute_text(chat, origin, dest)
+                            continue
+                    tg("sendMessage", chat_id=chat,
+                       text="🚦 *Commute weather advisor*\n\n"
+                            "Send your route like this:\n"
+                            "`/commute Gombak | KL Sentral`\n\n"
+                            "I'll ask your transport mode, check weather along "
+                            "the route, and suggest a safer alternative if "
+                            "heavy rain is expected.",
+                       parse_mode="Markdown")
+                    continue
+
+                if chat in commute_state:
+                    if "|" in text:
+                        origin, dest = [p.strip() for p in text.split("|", 1)]
+                        if origin and dest:
+                            handle_commute_text(chat, origin, dest)
+                            continue
+
                 loc = extract_location(msg)
                 if loc:
                     try:
@@ -101,7 +190,8 @@ def main():
                 else:
                     tg("sendMessage", chat_id=chat,
                        text="⛈ ThunderWatch MY — share your location (📎 → Location) "
-                            "or send 'lat lon' and I'll check thunderstorm risk near you.")
+                            "or send 'lat lon' for storm risk near you.\n"
+                            "Or try the commute advisor: /commute")
         except KeyboardInterrupt:
             break
         except Exception as e:

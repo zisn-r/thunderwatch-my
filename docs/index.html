@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>ThunderWatch MY — Thunderstorm Awareness</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
+<style>
+  :root { --bg:#0b1220; --panel:#111a2e; --line:#24304d; --txt:#e6ecf8; --mut:#8fa0c2;
+          --acc:#4da3ff; --low:#39c06f; --mod:#e8c33f; --high:#f08c2e; --sev:#e5484d; }
+  * { box-sizing:border-box; margin:0; }
+  html,body { height:100%; background:var(--bg); color:var(--txt);
+              font-family:system-ui,"Segoe UI",sans-serif; }
+  #wrap { display:flex; flex-direction:column; height:100%; }
+
+  header { padding:10px 16px; background:var(--panel); border-bottom:1px solid var(--line);
+           display:flex; gap:14px; align-items:center; flex-wrap:wrap; }
+  header h1 { font-size:16px; font-weight:700; letter-spacing:.3px; }
+  header h1 span { color:var(--acc); }
+  .tabs { display:flex; gap:6px; margin-left:auto; }
+  .tab { padding:6px 14px; border-radius:8px; border:1px solid var(--line); background:transparent;
+         color:var(--mut); font-size:13px; font-weight:600; cursor:pointer; }
+  .tab.active { background:var(--acc); border-color:var(--acc); color:#04121f; }
+
+  #map { flex:1; background:#000; }
+
+  #controls { display:flex; align-items:center; gap:12px; padding:10px 16px;
+              background:var(--panel); border-top:1px solid var(--line); }
+  #play { background:var(--acc); border:none; color:#04121f; font-weight:700; font-size:13px;
+          padding:8px 16px; border-radius:8px; cursor:pointer; min-width:84px; }
+  #scrub { flex:1; accent-color:var(--acc); }
+  #ts { font-variant-numeric:tabular-nums; font-size:13px; min-width:170px; text-align:right; }
+
+  #statusbar { padding:6px 16px; font-size:12px; color:var(--mut); background:var(--panel);
+               border-top:1px solid var(--line); display:flex; gap:16px; flex-wrap:wrap; }
+  .legend { display:inline-flex; gap:10px; align-items:center; }
+  .legend i { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:4px; }
+
+  .panel-box { background:rgba(17,26,46,.92); border:1px solid var(--line); border-radius:10px;
+               padding:10px 12px; font-size:12.5px; line-height:1.5; color:var(--txt); max-width:280px; }
+  .panel-box b.lvl-Severe { color:var(--sev); } .panel-box b.lvl-High { color:var(--high); }
+  .panel-box b.lvl-Moderate { color:var(--mod); } .panel-box b.lvl-Low { color:var(--low); }
+  .honest { color:var(--mut); font-size:11px; }
+
+  .leaflet-control-attribution { background:rgba(11,18,32,.85)!important; color:var(--mut)!important; font-size:10px!important; }
+  .leaflet-control-attribution a { color:var(--acc)!important; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <header>
+    <h1>⛈ ThunderWatch <span>MY</span></h1>
+    <div class="tabs">
+      <button class="tab active" id="tab-radar">Radar (live)</button>
+      <button class="tab" id="tab-forecast">Forecast (hourly)</button>
+    </div>
+  </header>
+  <div id="map"></div>
+  <div id="controls">
+    <button id="play">▶ Play</button>
+    <input type="range" id="scrub" min="0" max="0" value="0"/>
+    <div id="ts">—</div>
+  </div>
+  <div id="statusbar"><span id="status">Loading…</span></div>
+</div>
+
+<script>
+// ---------- shared map shell ----------
+const params = new URLSearchParams(location.search);
+const userLat = parseFloat(params.get('lat')) || 3.139;
+const userLon = parseFloat(params.get('lon')) || 101.687;
+
+const map = L.map('map', { center:[userLat, userLon], zoom: params.get('lat') ? 8 : 6,
+                           minZoom:5, maxZoom:11 });
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution:'© OpenStreetMap contributors', maxZoom:11
+}).addTo(map);
+
+const userMarker = L.circleMarker([userLat, userLon],
+  { radius:8, color:'#fff', weight:2, fillColor:'#4da3ff', fillOpacity:1 })
+  .bindTooltip('Your location').addTo(map);
+
+// ---------- deterministic scorer (same formula as core/risk.py) ----------
+function scoreHour(code, precipProb, cape) {
+  let s = 0;
+  if (code === 95) s += 50; else if (code === 96 || code === 99) s += 60;
+  s += Math.min(precipProb || 0, 100) * 0.30;
+  cape = cape || 0;
+  if (cape >= 2000) s += 20; else if (cape >= 1000) s += 14;
+  else if (cape >= 500) s += 8; else if (cape >= 250) s += 4;
+  return Math.min(s, 100);
+}
+function riskLevel(s){ return s >= 75 ? 'Severe' : s >= 50 ? 'High' : s >= 25 ? 'Moderate' : 'Low'; }
+function haversineKm(a,b,c,d){
+  const R=6371, toR=Math.PI/180,
+    dp=(c-a)*toR, dl=(d-b)*toR,
+    x=Math.sin(dp/2)**2+Math.cos(a*toR)*Math.cos(c*toR)*Math.sin(dl/2)**2;
+  return 2*R*Math.asin(Math.sqrt(x));
+}
+function bearingDeg(a,b,c,d){
+  const toR=Math.PI/180, dl=(d-b)*toR,
+    x=Math.sin(dl)*Math.cos(c*toR),
+    y=Math.cos(a*toR)*Math.sin(c*toR)-Math.sin(a*toR)*Math.cos(c*toR)*Math.cos(dl);
+  return (Math.atan2(x,y)*180/Math.PI+360)%360;
+}
+function offsetPoint(lat,lon,br,km){
+  const R=6371,toR=Math.PI/180,b=br*toR,p1=lat*toR,l1=lon*toR;
+  const p2=Math.asin(Math.sin(p1)*Math.cos(km/R)+Math.cos(p1)*Math.sin(km/R)*Math.cos(b));
+  const l2=l1+Math.atan2(Math.sin(b)*Math.sin(km/R)*Math.cos(p1),Math.cos(km/R)-Math.sin(p1)*Math.sin(p2));
+  return [p2/toR,(l2/toR+540)%360-180];
+}
+const COMPASS=['N','NE','E','SE','S','SW','W','NW'];
+const compass=d=>COMPASS[Math.floor((d+22.5)/45)%8];
+
+// ---------- TAB 1: Radar (RainViewer, past frames only) ----------
+const radarLayer = L.tileLayer('', { opacity:.75, tileSize:256, maxNativeZoom:7, zIndex:5,
+  attribution:'Radar imagery © <a href="https://www.rainviewer.com/">RainViewer</a>' });
+
+let frames=[], host='', idx=0, timer=null;
+const scrub=document.getElementById('scrub'), tsEl=document.getElementById('ts'),
+      playBtn=document.getElementById('play'), statusEl=document.getElementById('status');
+const fmt=t=>new Date(t*1000).toLocaleString('en-MY',{timeZone:'Asia/Kuala_Lumpur',
+  hour:'2-digit',minute:'2-digit',day:'2-digit',month:'short'})+' MYT';
+
+function preload(i){ // smooth play: warm browser cache for upcoming frames
+  for(let k=1;k<=3;k++){
+    const f=frames[(i+k)%frames.length]; if(!f) continue;
+    const n=2**6, x=Math.floor((userLon+180)/360*n),
+      y=Math.floor((1-Math.log(Math.tan(userLat*Math.PI/180)+1/Math.cos(userLat*Math.PI/180))/Math.PI)/2*n);
+    new Image().src = host+f.path+'/256/6/'+x+'/'+y+'/2/1/1.png';
+  }
+}
+function showFrame(i){
+  idx=i; const f=frames[i];
+  radarLayer.setUrl(host+f.path+'/256/{z}/{x}/{y}/2/1/1.png');
+  tsEl.textContent=fmt(f.time)+`  (${i+1}/${frames.length})`;
+  scrub.value=i; preload(i);
+}
+function startPlay(){ playBtn.textContent='⏸ Pause';
+  timer=setInterval(()=>showFrame((idx+1)%frames.length),700); }
+function stopPlay(){ if(timer)clearInterval(timer); timer=null; playBtn.textContent='▶ Play'; }
+playBtn.addEventListener('click',()=>timer?stopPlay():startPlay());
+scrub.addEventListener('input',()=>{
+  stopPlay();
+  if(mode==='forecast'&&fcGrid) renderForecastHour(+scrub.value);
+  else if(mode==='radar'&&frames.length) showFrame(+scrub.value);
+});
+
+function initRadar(){
+  statusEl.textContent='Fetching latest radar frames from RainViewer…';
+  fetch('https://api.rainviewer.com/public/weather-maps.json')
+    .then(r=>r.json()).then(d=>{
+      host=d.host; frames=d.radar.past||[];
+      if(!frames.length){ statusEl.textContent='No radar frames available right now.'; return; }
+      scrub.max=frames.length-1;
+      radarLayer.addTo(map);
+      showFrame(frames.length-1);
+      statusEl.innerHTML='Radar — last ~2 hours of observed rain cover (RainViewer). '+
+        '<span class="honest">National-scale imagery (free tier, zoom ≤ 7). Not a forecast.</span>';
+    }).catch(e=>statusEl.textContent='Radar unavailable: '+e);
+}
+
+// ---------- TAB 2: Forecast (Open-Meteo heatmap, client-side) ----------
+let heatLayer=null, fcGrid=null, fcHours=[], fcHourIdx=0;
+const fcScrub=document.getElementById('scrub');
+
+function buildGrid(){
+  const pts=[[userLat,userLon]];
+  for(const km of [10,20,30]) for(const b of [0,45,90,135,180,225,270,315])
+    pts.push(offsetPoint(userLat,userLon,b,km));
+  return pts;
+}
+
+function initForecast(){
+  if(fcGrid){ renderForecastHour(fcHourIdx); return; }
+  statusEl.textContent='Fetching Open-Meteo grid forecast (25 points)…';
+  const grid=buildGrid();
+  const lats=grid.map(p=>p[0].toFixed(4)).join(','), lons=grid.map(p=>p[1].toFixed(4)).join(',');
+  const url='https://api.open-meteo.com/v1/forecast?latitude='+lats+'&longitude='+lons+
+    '&hourly=weather_code,precipitation_probability,cape&forecast_hours=12&timezone=Asia%2FKuala_Lumpur';
+  fetch(url).then(r=>r.json()).then(series=>{
+    const arr=Array.isArray(series)?series:[series];
+    fcGrid=grid.map((p,i)=>{
+      const h=arr[i]?.hourly||{}; const n=(h.time||[]).length; const hours=[];
+      for(let j=0;j<n;j++) hours.push(scoreHour(h.weather_code?.[j],h.precipitation_probability?.[j],h.cape?.[j]));
+      return {lat:p[0],lon:p[1],scores:hours,dist:haversineKm(userLat,userLon,p[0],p[1])};
+    });
+    fcHours=arr[0]?.hourly?.time||[];
+    scrub.max=Math.max(fcHours.length-1,0); scrub.value=0;
+    renderForecastHour(0);
+  }).catch(e=>statusEl.textContent='Forecast unavailable: '+e);
+}
+
+function renderForecastHour(j){
+  fcHourIdx=j;
+  if(heatLayer) map.removeLayer(heatLayer);
+  const pts=fcGrid.map(g=>[g.lat,g.lon,(g.scores[j]||0)/100]);
+  heatLayer=L.heatLayer(pts,{radius:38,blur:28,maxZoom:9,max:1,
+    gradient:{0.15:'#1c4d8f',0.35:'#39c06f',0.55:'#e8c33f',0.75:'#f08c2e',0.95:'#e5484d'}}).addTo(map);
+  tsEl.textContent=(fcHours[j]||'').replace('T',' ')+' MYT';
+
+  const userScore=fcGrid[0].scores[j]||0;
+  const elevated=fcGrid.filter(g=>(g.scores[j]||0)>=50)
+    .sort((a,b)=>a.dist-b.dist)[0];
+  let html=`<div class="panel-box"><b>Forecast — modeled, not radar.</b><br>`;
+  html+=`Your point: <b class="lvl-${riskLevel(userScore)}">${riskLevel(userScore)}</b> (${Math.round(userScore)}/100)`;
+  if(elevated && elevated.dist>0.1){
+    const s=elevated.scores[j];
+    html+=`<br>Nearest elevated risk ~${elevated.dist.toFixed(0)} km ${compass(bearingDeg(userLat,userLon,elevated.lat,elevated.lon))}: `+
+      `<b class="lvl-${riskLevel(s)}">${riskLevel(s)}</b> (${Math.round(s)}/100)`;
+  }
+  html+=`<br><span class="honest">Open-Meteo grid model · same scorer as the chat agent.</span></div>`;
+  infoBox.setContent(html);
+}
+const infoBox=L.control({position:'bottomleft'});
+infoBox.onAdd=()=>{const d=L.DomUtil.create('div');return d;};
+infoBox.addTo(map);
+
+// ---------- tab switching ----------
+const tabRadar=document.getElementById('tab-radar'), tabForecast=document.getElementById('tab-forecast');
+let mode='radar';
+function setMode(m){
+  mode=m;
+  tabRadar.classList.toggle('active',m==='radar');
+  tabForecast.classList.toggle('active',m==='forecast');
+  stopPlay();
+  if(m==='radar'){
+    if(heatLayer){map.removeLayer(heatLayer);heatLayer=null;}
+    infoBox.getContainer().style.display='none';
+    if(frames.length) showFrame(idx); else initRadar();
+  } else {
+    map.removeLayer(radarLayer);
+    infoBox.getContainer().style.display='';
+    initForecast();
+  }
+}
+tabRadar.addEventListener('click',()=>setMode('radar'));
+tabForecast.addEventListener('click',()=>setMode('forecast'));
+
+initRadar();
+</script>
+</body>
+</html>

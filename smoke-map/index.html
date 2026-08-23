@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>ThunderWatch MY — Radar Smoke Test</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  :root { --bg:#0b1220; --panel:#111a2e; --line:#24304d; --txt:#e6ecf8; --mut:#8fa0c2; --acc:#4da3ff; }
+  * { box-sizing:border-box; margin:0; }
+  html,body { height:100%; background:var(--bg); color:var(--txt); font-family:system-ui,"Segoe UI",sans-serif; }
+  #wrap { display:flex; flex-direction:column; height:100%; }
+  header { padding:10px 14px; background:var(--panel); border-bottom:1px solid var(--line); display:flex; gap:12px; align-items:baseline; flex-wrap:wrap; }
+  header h1 { font-size:15px; font-weight:600; }
+  header .sub { font-size:12px; color:var(--mut); }
+  .badge { font-size:11px; padding:2px 8px; border-radius:20px; border:1px solid var(--line); color:var(--mut); }
+  .badge.ok { color:#5ad48a; border-color:#1d4630; }
+  #map { flex:1; background:#000; }
+  #controls { display:flex; align-items:center; gap:12px; padding:10px 14px; background:var(--panel); border-top:1px solid var(--line); }
+  #play { background:var(--acc); border:none; color:#04121f; font-weight:700; font-size:13px; padding:8px 16px; border-radius:8px; cursor:pointer; }
+  #scrub { flex:1; accent-color:var(--acc); }
+  #ts { font-variant-numeric:tabular-nums; font-size:13px; color:var(--txt); min-width:150px; text-align:right; }
+  #status { padding:6px 14px; font-size:12px; color:var(--mut); background:var(--panel); border-top:1px solid var(--line); }
+  .leaflet-control-attribution { background:rgba(11,18,32,.8)!important; color:var(--mut)!important; }
+  .leaflet-control-attribution a { color:var(--acc)!important; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <header>
+    <h1>ThunderWatch MY — Radar Tab Smoke Test</h1>
+    <span class="sub">RainViewer free tier · scheme 2 · radar max zoom 7</span>
+    <span class="badge ok" id="frameBadge">loading frames…</span>
+  </header>
+  <div id="map"></div>
+  <div id="controls">
+    <button id="play">▶ Play</button>
+    <input type="range" id="scrub" min="0" max="0" value="0"/>
+    <div id="ts">—</div>
+  </div>
+  <div id="status">Fetching weather-maps.json…</div>
+</div>
+<script>
+const map = L.map('map', { center:[3.2, 109.5], zoom:6, minZoom:5, maxZoom:10, zoomControl:true });
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution:'© OpenStreetMap contributors', maxZoom:10
+}).addTo(map);
+
+const radarLayer = L.tileLayer('', {
+  opacity:0.75, tileSize:256, maxNativeZoom:7, zIndex:5,
+  attribution:'Radar imagery © <a href="https://www.rainviewer.com/">RainViewer</a>'
+}).addTo(map);
+
+// KL reference marker
+L.circleMarker([3.139, 101.687], { radius:7, color:'#4da3ff', fillColor:'#4da3ff', fillOpacity:.9 })
+  .bindTooltip('Kuala Lumpur').addTo(map);
+
+const scrub = document.getElementById('scrub');
+const tsEl = document.getElementById('ts');
+const statusEl = document.getElementById('status');
+const playBtn = document.getElementById('play');
+const badge = document.getElementById('framebadge') || document.getElementById('frameBadge');
+
+let frames = [], host = '', idx = 0, timer = null;
+const fmt = t => new Date(t*1000).toLocaleString('en-MY', { timeZone:'Asia/Kuala_Lumpur',
+  hour:'2-digit', minute:'2-digit', day:'2-digit', month:'short' }) + ' MYT';
+
+function showFrame(i) {
+  idx = i;
+  const f = frames[i];
+  radarLayer.setUrl(host + f.path + '/256/{z}/{x}/{y}/2/1/1.png');
+  tsEl.textContent = fmt(f.time) + `  (${i+1}/${frames.length})`;
+  scrub.value = i;
+}
+
+fetch('https://api.rainviewer.com/public/weather-maps.json')
+  .then(r => r.json())
+  .then(d => {
+    host = d.host;
+    frames = d.radar.past || [];
+    const nowcast = d.radar.nowcast || [];
+    badge.textContent = `${frames.length} past frames · ${nowcast.length} nowcast`;
+    statusEl.textContent = nowcast.length === 0
+      ? 'VERIFIED: nowcast discontinued on free tier (Jan 2026) — scrubber covers past ~2 h only. Scheme 2 (Universal Blue) only. Radar tiles cap at zoom 7 (national scale).'
+      : `Nowcast frames available: ${nowcast.length}`;
+    if (!frames.length) { statusEl.textContent = 'No radar frames returned.'; return; }
+    scrub.max = frames.length - 1;
+    showFrame(frames.length - 1);
+  })
+  .catch(e => { statusEl.textContent = 'Failed to load RainViewer index: ' + e; });
+
+scrub.addEventListener('input', () => { stopPlay(); showFrame(+scrub.value); });
+playBtn.addEventListener('click', () => timer ? stopPlay() : startPlay());
+
+function startPlay() {
+  playBtn.textContent = '⏸ Pause';
+  timer = setInterval(() => showFrame((idx + 1) % frames.length), 700);
+}
+function stopPlay() {
+  if (timer) clearInterval(timer); timer = null; playBtn.textContent = '▶ Play';
+}
+</script>
+</body>
+</html>

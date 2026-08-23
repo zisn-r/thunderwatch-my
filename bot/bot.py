@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import risk  # noqa: E402
 
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "https://YOUR-USERNAME.github.io/thunderwatch-my/")
+DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "https://zisn-r.github.io/thunderwatch-my/")
 API = f"https://api.telegram.org/bot{TOKEN}"
 
 

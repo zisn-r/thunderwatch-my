@@ -35,6 +35,14 @@ STRINGS = {
         "commute_restart": "Start again with /commute.",
         "commute_geofail": "Sorry, I couldn't find one of those places. Try /commute again.",
         "mode_label_motorcycle": "Motorcycle 🏍", "mode_label_car": "Car 🚗", "mode_label_pt": "Public Transport 🚆",
+        # alerts
+        "watch_ok": "🔔 Now watching ({lat}, {lon}). I'll alert you when thunderstorm risk near you reaches *{level}* or higher — checked every ~10 minutes. Stop anytime with /unwatch.",
+        "watch_no_loc": "Share your location first (📎 → Location), then send /watch again.",
+        "unwatch_ok": "🔕 Stopped watching your location.",
+        "unwatch_none": "You weren't watching any location.",
+        "alert_head": "🚨 *Threshold Alert — storm risk near you has risen!*\n\n",
+        "all_clear": "✅ Storm risk near you has dropped (score {score}/100). Still watching.",
+        "sim_label": "\n\n_(demo simulation — injected)_",
     },
     "bm": {
         "advisory_title": "⛈ *Nasihat Risiko Ribut Petir*",
@@ -70,6 +78,14 @@ STRINGS = {
         "commute_restart": "Mulakan semula dengan /commute.",
         "commute_geofail": "Maaf, saya tidak dapat mencari salah satu lokasi itu. Cuba /commute sekali lagi.",
         "mode_label_motorcycle": "Motosikal 🏍", "mode_label_car": "Kereta 🚗", "mode_label_pt": "Pengangkutan Awam 🚆",
+        # alerts
+        "watch_ok": "🔔 Kini memantau ({lat}, {lon}). Saya akan memberi amaran apabila risiko ribut petir berhampiran anda mencapai *{level}* atau lebih tinggi — disemak setiap ~10 minit. Hentikan bila-bila masa dengan /unwatch.",
+        "watch_no_loc": "Kongsi lokasi anda dahulu (📎 → Lokasi), kemudian hantar /watch sekali lagi.",
+        "unwatch_ok": "🔕 Berhenti memantau lokasi anda.",
+        "unwatch_none": "Anda tidak memantau sebarang lokasi.",
+        "alert_head": "🚨 *Amaran Ambang — risiko ribut berhampiran anda telah meningkat!*\n\n",
+        "all_clear": "✅ Risiko ribut berhampiran anda telah menurun (skor {score}/100). Masih memantau.",
+        "sim_label": "\n\n_(simulasi demo — disuntik)_",
     },
 }
 

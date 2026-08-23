@@ -10,6 +10,7 @@ dashboard deep-link (?lat=&lon=) + official warning cross-check.
 import json
 import os
 import sys
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -17,6 +18,7 @@ import urllib.request
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "core"))
 import risk      # noqa: E402
 import commute   # noqa: E402
+import alerts    # noqa: E402
 from i18n import t, level_name  # noqa: E402
 
 STRINGS_BM_SET = "Bahasa ditetapkan kepada Bahasa Melayu. Hantar /en untuk English."
@@ -27,7 +29,8 @@ API = f"https://api.telegram.org/bot{TOKEN}"
 
 # Conversation state for the commute flow: chat_id -> {"origin": str|None}
 commute_state = {}
-chat_lang = {}  # chat_id -> "en" | "bm"
+chat_lang = {}    # chat_id -> "en" | "bm"
+last_location = {}  # chat_id -> (lat, lon) — remembered so /watch needs no args
 
 
 def lang_of(chat_id):
@@ -186,12 +189,55 @@ def build_commute_reply(origin, dest, res, lang, origin_coords, dest_coords):
     return "\n".join(lines)
 
 
+# --- threshold alert re-poll -------------------------------------------------
+
+def effective_score(r):
+    """User-point score; elevated nearby points raise the floor."""
+    score = r["score_at_user"]
+    if r["nearest_elevated"]:
+        score = max(score, r["nearest_elevated"]["peak_score"] - 10)
+    return score
+
+
+def poll_alerts():
+    """Background thread: re-score every subscription, push on threshold."""
+    demo_rain = os.environ.get("DEMO_RAIN") == "1"
+    while True:
+        subs = alerts.load()
+        for sub in subs:
+            chat = sub["chat_id"]
+            lang = lang_of(chat)
+            try:
+                r = risk.assess(sub["lat"], sub["lon"])
+                score = effective_score(r)
+                if demo_rain:
+                    score = max(score, 78.0)
+                if sub["state"] == "armed" and score >= sub["threshold"]:
+                    text = t(lang, "alert_head")
+                    text += build_reply_lang(sub["lat"], sub["lon"], lang)
+                    if demo_rain:
+                        text += t(lang, "sim_label")
+                    tg("sendMessage", chat_id=chat, text=text, parse_mode="Markdown")
+                    sub["state"] = "cooling"
+                    sub["last_alert"] = time.time()
+                elif sub["state"] == "cooling" and score < alerts.REARM_SCORE:
+                    tg("sendMessage", chat_id=chat,
+                       text=t(lang, "all_clear", score=f"{score:.0f}"))
+                    sub["state"] = "armed"
+            except Exception as e:
+                print(f"[alert-poll] chat {chat}: {e}", file=sys.stderr)
+        alerts.save(subs)  # persist state transitions
+        time.sleep(alerts.POLL_INTERVAL_S)
+
+
 def main():
     if not TOKEN:
         print("Set TELEGRAM_BOT_TOKEN first.", file=sys.stderr)
         sys.exit(1)
     me = tg("getMe")
     print(f"Bot online: @{me['result']['username']}")
+    threading.Thread(target=poll_alerts, daemon=True).start()
+    print(f"Alert poller started (every {alerts.POLL_INTERVAL_S//60} min)")
     offset = None
     while True:
         try:
@@ -226,6 +272,24 @@ def main():
                     tg("sendMessage", chat_id=chat, text="🇬🇧 Language set to English.")
                     continue
 
+                if text.startswith("/watch"):
+                    lang = lang_of(chat)
+                    loc = last_location.get(chat) or extract_location(msg)
+                    if not loc:
+                        tg("sendMessage", chat_id=chat, text=t(lang, "watch_no_loc"))
+                        continue
+                    alerts.add(chat, loc[0], loc[1])
+                    tg("sendMessage", chat_id=chat,
+                       text=t(lang, "watch_ok", lat=f"{loc[0]:.4f}", lon=f"{loc[1]:.4f}",
+                              level=level_name(lang, risk.risk_level(alerts.DEFAULT_THRESHOLD))),
+                       parse_mode="Markdown")
+                    continue
+                if text.startswith("/unwatch"):
+                    lang = lang_of(chat)
+                    key = t(lang, "unwatch_ok" if alerts.remove(chat) else "unwatch_none")
+                    tg("sendMessage", chat_id=chat, text=key)
+                    continue
+
                 if text.startswith("/commute"):
                     rest = text[len("/commute"):].strip()
                     if "|" in rest:
@@ -247,6 +311,7 @@ def main():
 
                 loc = extract_location(msg)
                 if loc:
+                    last_location[chat] = loc
                     try:
                         tg("sendMessage", chat_id=chat,
                            text=build_reply_lang(*loc, lang=lang_of(chat)),

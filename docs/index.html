@@ -218,6 +218,29 @@ const infoBox=L.control({position:'bottomleft'});
 infoBox.onAdd=()=>{const d=L.DomUtil.create('div');return d;};
 infoBox.addTo(map);
 
+// ---------- Route mode (OSRM driving geometry via deep-link) ----------
+function initRoute(){
+  const ol=[parseFloat(params.get('olat')),parseFloat(params.get('olon'))];
+  const dl=[parseFloat(params.get('dlat')),parseFloat(params.get('dlon'))];
+  if(!ol.every(isFinite)||!dl.every(isFinite)){ statusEl.textContent='Route params missing.'; return; }
+  L.circleMarker(ol,{radius:9,color:'#fff',weight:2,fillColor:'#39c06f',fillOpacity:1})
+    .bindTooltip('Origin').addTo(map);
+  L.circleMarker(dl,{radius:9,color:'#fff',weight:2,fillColor:'#e5484d',fillOpacity:1})
+    .bindTooltip('Destination').addTo(map);
+  map.fitBounds([ol,dl],{padding:[40,40]});
+  statusEl.textContent='Fetching driving route from OSRM…';
+  const url='https://router.project-osrm.org/route/v1/driving/'+
+    ol[1]+','+ol[0]+';'+dl[1]+','+dl[0]+'?overview=full&geometries=geojson';
+  fetch(url).then(r=>r.json()).then(d=>{
+    if(d.code!=='Ok'||!d.routes||!d.routes.length){ statusEl.textContent='No route found.'; return; }
+    const rt=d.routes[0];
+    L.geoJSON(rt.geometry,{style:{color:'#4da3ff',weight:5,opacity:.85}}).addTo(map);
+    statusEl.textContent=`Suggested road route (OSRM): ${(rt.distance/1000).toFixed(1)} km · `+
+      `~${Math.round(rt.duration/60)} min drive. `+
+      '<span class="honest">Weather along this route is what the bot checked (nearest sample points).</span>';
+  }).catch(e=>statusEl.textContent='Route fetch failed: '+e);
+}
+
 // ---------- tab switching ----------
 const tabRadar=document.getElementById('tab-radar'), tabForecast=document.getElementById('tab-forecast');
 let mode='radar';
@@ -239,7 +262,13 @@ function setMode(m){
 tabRadar.addEventListener('click',()=>setMode('radar'));
 tabForecast.addEventListener('click',()=>setMode('forecast'));
 
-initRadar();
+if(params.get('route')==='1'){
+  document.querySelector('.tabs').style.display='none';
+  document.getElementById('controls').style.display='none';
+  initRoute();
+} else {
+  initRadar();
+}
 </script>
 </body>
 </html>
